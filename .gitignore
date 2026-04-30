@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Maya
+*.swatches
+*.mayaSwatches
+uiConfiguration/
+*.mel.bak
+*.ma.bak
+*.mb.bak
+
+# Maya temp / auto-save
+incrementalSave/
+autosave/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# Logs
+*.log
+
+# Data — keep the presets folder but ignore any local test presets
+data/presets/*.json
+!data/presets/.gitkeep
