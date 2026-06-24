@@ -216,9 +216,19 @@ class WeightManager:
     """
     Manages NGSkinTools2 weight export files in data/weights/.
 
+    File naming encodes the full category path:
+        tree_path=['Creature', 'Biped'], name='legs'
+        -> 'Creature__Biped__legs.json'
+
+    This means two presets with the same name but different categories
+    are always stored as distinct files. The filename is the source of
+    truth for the tree path — metadata mirrors it for readability.
+
     One file per preset — we embed NGBuddy metadata directly into the
     NGSkinTools export JSON under the key 'ngbuddy_meta'. No sidecar files.
     """
+
+    SEPARATOR = "__"
 
     def __init__(self, weight_dir=None):
         self.weight_dir = weight_dir or WEIGHT_DIR
@@ -228,18 +238,68 @@ class WeightManager:
         if not os.path.exists(self.weight_dir):
             os.makedirs(self.weight_dir)
 
-    def weight_path(self, name):
-        """Return the full path for a weight preset file."""
-        return os.path.join(self.weight_dir, f"{name}.json")
+    # ------------------------------------------------------------------
+    # Stem helpers
+    # ------------------------------------------------------------------
+
+    def make_stem(self, name, tree_path=None):
+        """
+        Build the filename stem (no extension) from a name + optional path.
+
+        Examples:
+            make_stem('legs')                          -> 'legs'
+            make_stem('legs', ['Creature', 'Biped'])   -> 'Creature__Biped__legs'
+        """
+        if tree_path:
+            parts = list(tree_path) + [name]
+        else:
+            parts = [name]
+        return self.SEPARATOR.join(parts)
+
+    def decode_stem(self, stem):
+        """
+        Split a stem back into (tree_path, display_name).
+
+        Examples:
+            decode_stem('legs')                  -> ([], 'legs')
+            decode_stem('Creature__Biped__legs') -> (['Creature', 'Biped'], 'legs')
+        """
+        parts = stem.split(self.SEPARATOR)
+        return parts[:-1], parts[-1]
+
+    # ------------------------------------------------------------------
+    # Path resolution
+    # ------------------------------------------------------------------
+
+    def weight_path(self, name, tree_path=None):
+        """
+        Return the full filesystem path for a weight preset.
+
+        Pass tree_path when saving a new file so the path is encoded
+        into the filename. For lookups by existing stem, use
+        weight_path_from_stem() instead.
+        """
+        stem = self.make_stem(name, tree_path)
+        return os.path.join(self.weight_dir, f"{stem}.json")
+
+    def weight_path_from_stem(self, stem):
+        """Return the full path for an already-encoded stem."""
+        return os.path.join(self.weight_dir, f"{stem}.json")
+
+    # ------------------------------------------------------------------
+    # Listing
+    # ------------------------------------------------------------------
 
     def list_weights(self):
         """
-        Return list of (name, meta) tuples for all weight presets.
-        Structured as a tree via meta['tree'] if present, else flat list.
+        Return a list of stems for all valid weight presets on disk.
+        A valid file must contain the 'ngbuddy_meta' key.
+
+        Stems encode the full path, e.g. 'Creature__Biped__legs'.
         """
         if not os.path.exists(self.weight_dir):
             return []
-        names = []
+        stems = []
         for f in sorted(os.listdir(self.weight_dir)):
             if not f.endswith(".json"):
                 continue
@@ -247,16 +307,19 @@ class WeightManager:
             try:
                 with open(path, "r") as fh:
                     data = json.load(fh)
-                # Only count files that have our metadata key
                 if "ngbuddy_meta" in data:
-                    names.append(os.path.splitext(f)[0])
+                    stems.append(os.path.splitext(f)[0])
             except Exception:
                 continue
-        return names
+        return stems
 
-    def load_meta(self, name):
-        """Load NGBuddy metadata embedded in the weight file."""
-        path = self.weight_path(name)
+    # ------------------------------------------------------------------
+    # Metadata
+    # ------------------------------------------------------------------
+
+    def load_meta(self, stem):
+        """Load NGBuddy metadata embedded in the weight file for the given stem."""
+        path = self.weight_path_from_stem(stem)
         if not os.path.exists(path):
             return None
         try:
@@ -264,23 +327,28 @@ class WeightManager:
                 data = json.load(f)
             return data.get("ngbuddy_meta", {})
         except Exception as e:
-            print(f"[NGBuddy] Error loading weight meta '{name}': {e}")
+            print(f"[NGBuddy] Error loading weight meta '{stem}': {e}")
             return None
 
-    def save_meta(self, name, mesh, description="", tree_path=None):
+    def save_meta(self, stem, mesh, description="", tree_path=None):
         """
         Embed NGBuddy metadata into an existing weight file.
-        tree_path: list of strings representing category path e.g. ['Creature', 'Biped']
+
+        stem:      encoded filename stem, e.g. 'Creature__Biped__legs'
+        tree_path: list of category strings, e.g. ['Creature', 'Biped']
         """
-        path = self.weight_path(name)
+        path = self.weight_path_from_stem(stem)
         if not os.path.exists(path):
             print(f"[NGBuddy] Cannot save meta — weight file not found: {path}")
             return False
         try:
             with open(path, "r") as f:
                 data = json.load(f)
+
+            _, display_name = self.decode_stem(stem)
             data["ngbuddy_meta"] = {
-                "name":        name,
+                "name":        display_name,
+                "stem":        stem,
                 "mesh":        mesh,
                 "description": description,
                 "tree_path":   tree_path or [],
@@ -289,62 +357,85 @@ class WeightManager:
                 json.dump(data, f, indent=2)
             return True
         except Exception as e:
-            print(f"[NGBuddy] Error saving weight meta '{name}': {e}")
+            print(f"[NGBuddy] Error saving weight meta '{stem}': {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # Tree building
+    # ------------------------------------------------------------------
 
     def get_weight_tree(self):
         """
-        Build a nested tree structure from all weight presets using their tree_path metadata.
-        Returns a dict tree: {category: {subcategory: [name, ...], ...}, ...}
-        Flat presets (no tree_path) go under '__root__'.
+        Build a nested dict tree from all weight presets by decoding
+        their filename stems. The filename is the source of truth —
+        no metadata reads required to reconstruct the tree.
+
+        Tree shape:
+            {
+                'Creature': {
+                    'Biped': {
+                        '__presets__': [('Creature__Biped__legs', 'legs'), ...]
+                    }
+                },
+                '__presets__': [('torso', 'torso'), ...]   # flat / no category
+            }
         """
         tree = {}
-        for name in self.list_weights():
-            meta = self.load_meta(name) or {}
-            path = meta.get("tree_path", [])
+        for stem in self.list_weights():
+            path_parts, display_name = self.decode_stem(stem)
             node = tree
-            for part in path:
+            for part in path_parts:
                 node = node.setdefault(part, {})
-            node.setdefault("__presets__", []).append(name)
+            node.setdefault("__presets__", []).append((stem, display_name))
         return tree
 
     def build_menu_items(self, max_label_length=40):
         """
-        Return a flat list of (label, name) for populating optionMenu.
-        Each label shows the full path: Category/Subcategory/name
-        If the full path is too long, truncate from the left so the
-        preset name is always visible: ...Subcategory/name
-        Categories are walked depth-first before presets at each level.
+        Return a flat list of (label, stem_or_None) for populating an optionMenu.
+
+        Category rows  -> (label, None)   — not selectable
+        Preset rows    -> (label, stem)   — stem is the key used everywhere else
+
+        Labels show the full human-readable path using '/' as separator.
         """
         items = []
 
         def walk(node, path_parts):
-            # Walk subcategories first (depth-first), then presets at this level
-            categories = {k: v for k, v in node.items()
-                          if k != "__presets__" and isinstance(v, dict)}
+            # Categories first, sorted alphabetically — no header row, just recurse
+            categories = {
+                k: v for k, v in node.items()
+                if k != "__presets__" and isinstance(v, dict)
+            }
             for key in sorted(categories):
                 walk(categories[key], path_parts + [key])
 
-            for name in sorted(node.get("__presets__", [])):
-                parts = path_parts + [name]
-                full_label = "/".join(parts)
-                if len(full_label) > max_label_length:
-                    full_label = "..." + full_label[-(max_label_length - 3):]
-                items.append((full_label, name))
+            # Then presets at this level, sorted by display name
+            for stem, display_name in sorted(
+                node.get("__presets__", []), key=lambda x: x[1]
+            ):
+                parts = path_parts + [display_name]
+                label = "/".join(parts)
+                if len(label) > max_label_length:
+                    label = "..." + label[-(max_label_length - 3):]
+                items.append((label, stem))
 
         walk(self.get_weight_tree(), [])
         return items
 
-    def delete(self, name):
-        """Delete a weight preset file. Returns True on success."""
-        path = self.weight_path(name)
+    # ------------------------------------------------------------------
+    # Delete
+    # ------------------------------------------------------------------
+
+    def delete(self, stem):
+        """Delete a weight preset file by its encoded stem. Returns True on success."""
+        path = self.weight_path_from_stem(stem)
         if not os.path.exists(path):
             return False
         try:
             os.remove(path)
             return True
         except Exception as e:
-            print(f"[NGBuddy] Error deleting weight preset '{name}': {e}")
+            print(f"[NGBuddy] Error deleting weight preset '{stem}': {e}")
             return False
 
     def open_folder(self):

@@ -18,14 +18,14 @@ TABS = [
         "info":   "Set up your rig for skinning.\nBind your mesh, initialize NGSkin layers\nand establish your base layer stack."
     },
     {
-        "label":  "Mirror",
-        "accent": Colors.ACCENT_MIRROR,
-        "info":   "Mirror skin weights across your rig.\nChoose axis, direction and threshold\nusing saved presets per character."
-    },
-    {
         "label":  "Copy & Paste",
         "accent": Colors.ACCENT_COPYPASTE,
         "info":   "Copy weights between meshes or layers.\nUse presets to transfer weights\nacross LODs or mesh variations."
+    },
+    {
+        "label":  "Utils",
+        "accent": Colors.ACCENT_UTILS,
+        "info":   "General utilities for skin weight operations.\nMirror weights across all layers,\nand other helpers not covered by NGSkin Tools."
     },
     {
         "label":  "Skinning",
@@ -43,7 +43,7 @@ class MainWindow:
         self.current_tab    = 0
         self.tab_buttons    = []
         self.tab_panels     = []
-        self.tab_instances  = {}     # index -> tab object (e.g. BuildTab)
+        self.tab_instances  = {}
         self.info_text      = None
         self.info_frame     = None
         self.status_text    = None
@@ -145,7 +145,7 @@ class MainWindow:
         cmds.setParent('..')
 
         cmds.button(
-            label=u"↺",  # refresh arrow ↺
+            label=u"\u21ba",
             width=Dimensions.HELP_BTN_WIDTH,
             height=Dimensions.TAB_HEIGHT,
             backgroundColor=Colors.BG_ELEMENT,
@@ -225,9 +225,22 @@ class MainWindow:
 
             if tab["label"] == "Build":
                 from ui.build_tab import BuildTab
-                build_tab = BuildTab(panel, self._get_current_mesh)
-                build_tab.build()
-                self.tab_instances[i] = build_tab
+                instance = BuildTab(panel, self._get_current_mesh)
+                instance.build()
+                self.tab_instances[i] = instance
+
+            elif tab["label"] == "Copy & Paste":
+                from ui.copy_paste_tab import CopyPasteTab
+                instance = CopyPasteTab(panel, self._get_current_mesh)
+                instance.build()
+                self.tab_instances[i] = instance
+
+            elif tab["label"] == "Utils":
+                from ui.utils_tab import UtilsTab
+                instance = UtilsTab(panel, self._get_current_mesh)
+                instance.build()
+                self.tab_instances[i] = instance
+
             else:
                 self._build_placeholder(tab["label"])
 
@@ -325,7 +338,6 @@ class MainWindow:
         self._set_status(f"{mesh}  |  {skin_clusters[0]}", valid=True)
 
     def _set_status(self, message, valid=True):
-        """Update status bar text and enable/disable tab content"""
         if self.status_text and cmds.text(self.status_text, exists=True):
             cmds.text(
                 self.status_text,
@@ -337,16 +349,12 @@ class MainWindow:
         if not valid:
             self.current_mesh = None
 
-        # Enable/disable all tab instances
         for tab in self.tab_instances.values():
             tab.set_enabled(valid)
     # endregion
 
     # region [12] PUBLIC METHODS
     def refresh_ui(self):
-        """Refresh the entire UI — rebuilds the current tab content."""
-        current = self.current_tab
-        # Rebuild the window entirely via show_ui pattern
         from ui.main_window import MainWindow
         window = MainWindow()
         window.create()

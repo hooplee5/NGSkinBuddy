@@ -255,6 +255,50 @@ def read_layers_from_mesh(mesh):
 
 
 # region [09] WEIGHT EXPORT / IMPORT
+def restore_weights(mesh, filepath):
+    """
+    Restore NGST layer data onto a freshly rebound mesh from a prior export.
+
+    Uses NGSkinTools2 native import_json with vertex-ID matching (vertex indices
+    are unchanged after unbind+rebind on the same mesh) and name-based influence
+    mapping. Produces an exact copy of the original layer hierarchy with no wrapper
+    layer added on top.
+
+    Distinct from import_weights() which wraps layers in IMPORTED_WEIGHTS_N and is
+    intended for the Copy & Paste workflow.
+
+    Returns True on success.
+    """
+    import os
+    if not os.path.exists(filepath):
+        print(f"[NGBuddy] Restore file not found: {filepath}")
+        return False
+    try:
+        from ngSkinTools2 import api as ngst_api
+        from ngSkinTools2.api import InfluenceMappingConfig, VertexTransferMode, Layers
+
+        layers_api = Layers(mesh)
+        if layers_api.is_enabled():
+            layers_api.clear()
+
+        infl_config = InfluenceMappingConfig()
+        infl_config.use_name_matching     = True
+        infl_config.use_distance_matching = False
+        infl_config.use_label_matching    = False
+
+        ngst_api.import_json(
+            mesh,
+            file=filepath,
+            vertex_transfer_mode=VertexTransferMode.vertexId,
+            influences_mapping_config=infl_config,
+        )
+        print(f"[NGBuddy] Layer data restored: {filepath}")
+        return True
+    except Exception as e:
+        print(f"[NGBuddy] Error restoring weights for '{mesh}': {e}")
+        return False
+
+
 def export_weights(mesh, filepath):
     """
     Export NGSkinTools2 layer weights for a mesh to a JSON file.

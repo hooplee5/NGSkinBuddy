@@ -455,17 +455,25 @@ class BuildTab:
         if not mesh:
             print("[NGBuddy] No valid mesh selected")
             return
-        label = cmds.optionMenu(self.assign_preset_menu, query=True, value=True)
-        if not label or label == "No weight presets found":
+
+        index = cmds.optionMenu(self.assign_preset_menu, query=True, select=True)
+
+        if not hasattr(self, "_weight_menu_map") or index < 1 or index > len(self._weight_menu_map):
             cmds.confirmDialog(title="NGBuddy", message="No weight preset selected.", button=["OK"])
             return
 
-        # Resolve actual preset name from the label — name is always the last segment
-        # Label format: "Category/Subcategory/name" or "...Category/name"
-        name = label.split("/")[-1].strip()
-        if not name or not self.weight_manager.weight_path(name):
-            cmds.confirmDialog(title="NGBuddy", message="Could not resolve weight preset.", button=["OK"])
+        stem = self._weight_menu_map[index - 1]
+
+        if not stem:
+            cmds.confirmDialog(title="NGBuddy", message="No weight preset selected.", button=["OK"])
             return
+
+        filepath = self.weight_manager.weight_path_from_stem(stem)
+        if not os.path.exists(filepath):
+            cmds.confirmDialog(title="NGBuddy", message="Could not resolve weight preset file.", button=["OK"])
+            return
+
+        _, display_name = self.weight_manager.decode_stem(stem)
 
         confirm = cmds.confirmDialog(
             title="Assign Initial Weights",
@@ -480,7 +488,6 @@ class BuildTab:
         self.set_enabled(False)
         cmds.refresh()
         try:
-            filepath = self.weight_manager.weight_path(name)
             import_weights(mesh, filepath)
         finally:
             self.set_enabled(True)
@@ -594,60 +601,72 @@ class BuildTab:
             cmds.confirmDialog(title="NGBuddy", message="No valid mesh selected.", button=["OK"])
             return
 
+        # --- Step 1: get preset name ---
         result = cmds.promptDialog(
             title="Save Weight Preset",
             message="Weight preset name:",
-            button=["Save", "Cancel"],
-            defaultButton="Save",
+            button=["Next", "Cancel"],
+            defaultButton="Next",
             cancelButton="Cancel",
             dismissString="Cancel"
         )
-        if result != "Save":
+        if result != "Next":
             return
+
         name = cmds.promptDialog(query=True, text=True).strip()
         if not name:
             return
 
-        # Optional category path for tree structure
-        # User can type the path using / or \ as separators e.g. Creature/Biped
-        path_result = cmds.promptDialog(
-            title="Save Weight Preset",
-            message="Category path (optional):\nUse / or \\ to separate levels\ne.g. Creature/Biped",
-            button=["OK", "Skip"],
-            defaultButton="Skip",
+        # --- Step 2: get category path ---
+        result = cmds.promptDialog(
+            title="Category (Optional)",
+            message="Category path (optional):\nUse / to separate levels\nExample: Creature/Biped",
+            button=["Save", "Skip"],
+            defaultButton="Save",
             cancelButton="Skip",
             dismissString="Skip"
         )
+
         tree_path = []
-        if path_result == "OK":
+        if result == "Save":
             raw = cmds.promptDialog(query=True, text=True).strip()
             if raw:
-                # Normalize both / and \ as separators
                 import re
                 tree_path = [p.strip() for p in re.split(r'[/\\]+', raw) if p.strip()]
 
-        filepath = self.weight_manager.weight_path(name)
+        # Build the encoded stem and resolve the filepath from it
+        # e.g. name='legs', tree_path=['Creature','Biped'] -> stem='Creature__Biped__legs'
+        #      -> file: data/weights/Creature__Biped__legs.json
+        stem     = self.weight_manager.make_stem(name, tree_path)
+        filepath = self.weight_manager.weight_path_from_stem(stem)
+
+        print(f"[NGBuddy] Saving weight preset: stem='{stem}' path='{filepath}'")
+
         if export_weights(mesh, filepath):
-            self.weight_manager.save_meta(name, mesh, tree_path=tree_path)
+            self.weight_manager.save_meta(stem, mesh, tree_path=tree_path)
             self._refresh_weight_menu()
-            print(f"[NGBuddy] Weight preset '{name}' saved")
+            print(f"[NGBuddy] Weight preset '{stem}' saved")
         else:
             cmds.confirmDialog(title="NGBuddy", message="Failed to save weights.", button=["OK"])
 
-
-
     def _on_delete_weight(self):
-        label = cmds.optionMenu(self.assign_preset_menu, query=True, value=True)
-        if not label or label == "No weight presets found":
+        index = cmds.optionMenu(self.assign_preset_menu, query=True, select=True)
+
+        if not hasattr(self, "_weight_menu_map") or index < 1 or index > len(self._weight_menu_map):
             cmds.confirmDialog(title="NGBuddy", message="No weight preset selected.", button=["OK"])
             return
 
-        # Resolve actual name — always the last segment of the path label
-        name = label.split("/")[-1].strip()
+        stem = self._weight_menu_map[index - 1]
+
+        if not stem:
+            cmds.confirmDialog(title="NGBuddy", message="Could not resolve weight preset.", button=["OK"])
+            return
+
+        _, display_name = self.weight_manager.decode_stem(stem)
 
         confirm = cmds.confirmDialog(
             title="Delete Weight Preset",
-            message=f"Delete weight preset '{name}'? This cannot be undone.",
+            message=f"Delete weight preset '{display_name}'? This cannot be undone.",
             button=["Delete", "Cancel"],
             defaultButton="Cancel",
             cancelButton="Cancel"
@@ -655,9 +674,9 @@ class BuildTab:
         if confirm != "Delete":
             return
 
-        self.weight_manager.delete(name)
+        self.weight_manager.delete(stem)
         self._refresh_weight_menu()
-        print(f"[NGBuddy] Weight preset '{name}' deleted")
+        print(f"[NGBuddy] Weight preset '{stem}' deleted")
 
     def _on_open_weight_folder(self):
         self.weight_manager.open_folder()
@@ -700,17 +719,26 @@ class BuildTab:
         """Rebuild the weight preset optionMenu using tree structure for visual hierarchy."""
         if not self.assign_preset_menu or not cmds.optionMenu(self.assign_preset_menu, exists=True):
             return
+
+        # Clear existing items
         items = cmds.optionMenu(self.assign_preset_menu, query=True, itemListLong=True) or []
         for item in items:
             cmds.deleteUI(item)
 
+        # Create mapping: menu index (1-based) -> stem
+        self._weight_menu_map = []
+
         menu_items = self.weight_manager.build_menu_items()
+
         if menu_items:
-            for label, name in menu_items:
+            for label, stem in menu_items:
                 cmds.menuItem(label=label, parent=self.assign_preset_menu)
+                self._weight_menu_map.append(stem)  # None for category rows, stem for presets
         else:
             cmds.menuItem(label="No weight presets found", parent=self.assign_preset_menu)
+            self._weight_menu_map.append(None)
     # endregion
+
     # region [13] ENABLE / DISABLE
     def set_enabled(self, enabled):
         if cmds.columnLayout(self.content_layout, exists=True):

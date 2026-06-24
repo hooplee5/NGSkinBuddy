@@ -18,7 +18,7 @@ class Colors:
 
     # Tab Accent Colors
     ACCENT_BUILD      = [0.784, 0.588, 0.165]  # #c8962a  amber
-    ACCENT_MIRROR     = [0.290, 0.565, 0.722]  # #4a90b8  blue
+    ACCENT_UTILS      = [0.290, 0.565, 0.722]  # #4a90b8  blue
     ACCENT_COPYPASTE  = [0.290, 0.659, 0.600]  # #4aA899  teal
     ACCENT_SKINNING   = [0.533, 0.533, 0.533]  # TBD — placeholder grey
 

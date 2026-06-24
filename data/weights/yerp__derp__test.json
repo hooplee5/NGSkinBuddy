@@ -4812,9 +4812,13 @@
     }
   ],
   "ngbuddy_meta": {
-    "name": "othertest",
+    "name": "test",
+    "stem": "yerp__derp__test",
     "mesh": "pSphere1",
     "description": "",
-    "tree_path": []
+    "tree_path": [
+      "yerp",
+      "derp"
+    ]
   }
 }
