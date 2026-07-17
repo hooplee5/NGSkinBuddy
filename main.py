@@ -15,6 +15,7 @@ import core.presets;        importlib.reload(core.presets)
 import core.ng_api;         importlib.reload(core.ng_api)
 import ui.build_tab;        importlib.reload(ui.build_tab)
 import ui.copy_paste_tab;   importlib.reload(ui.copy_paste_tab)
+import ui.skinning_tab;     importlib.reload(ui.skinning_tab)
 import ui.main_window;      importlib.reload(ui.main_window)
 # endregion
 

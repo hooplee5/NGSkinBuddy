@@ -20,7 +20,7 @@ class Colors:
     ACCENT_BUILD      = [0.784, 0.588, 0.165]  # #c8962a  amber
     ACCENT_UTILS      = [0.290, 0.565, 0.722]  # #4a90b8  blue
     ACCENT_COPYPASTE  = [0.290, 0.659, 0.600]  # #4aA899  teal
-    ACCENT_SKINNING   = [0.533, 0.533, 0.533]  # TBD — placeholder grey
+    ACCENT_SKINNING   = [0.420, 0.310, 0.620]  # #6b4f9e  purple — active paint target
 
     # State Colors
     SUCCESS = [0.290, 0.659, 0.400]

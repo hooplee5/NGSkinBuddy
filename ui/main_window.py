@@ -2,7 +2,6 @@
 import maya.cmds as cmds
 from style.colors import Colors
 from style.dimensions import Dimensions
-from core.ng_api import is_valid_skinned_mesh
 # endregion
 
 # region [02] CONSTANTS
@@ -10,6 +9,7 @@ WINDOW_NAME  = "NGBuddyWorkspaceControl"
 WINDOW_LABEL = "NGBuddy"
 VERSION      = "v0.1"
 REPO_URL     = "https://github.com/kaijutd/NGSkinBuddy"
+NGST2_DOCK   = "ngSkinTools2_mainWindow"
 
 TABS = [
     {
@@ -36,20 +36,49 @@ TABS = [
 # endregion
 
 
+class _ResizeFilter:
+    """Forwards resize events from a cmds-managed Qt widget to a PySide2 child widget."""
+    def __init__(self, child, parent_widget):
+        self._child = child
+        self._parent = parent_widget
+
+        try:
+            from PySide2.QtCore import QObject, QEvent
+        except ImportError:
+            from PySide6.QtCore import QObject, QEvent
+
+        class _Filter(QObject):
+            def __init__(self2, child, parent_widget):
+                super().__init__(parent_widget)
+                self2._child = child
+                self2._parent = parent_widget
+
+            def eventFilter(self2, obj, event):
+                if event.type() == QEvent.Resize:
+                    self2._child.setGeometry(0, 0,
+                        self2._parent.width(), self2._parent.height())
+                return False
+
+        self._filter = _Filter(child, parent_widget)
+        parent_widget.installEventFilter(self._filter)
+
+
 class MainWindow:
 
     # region [03] INIT
     def __init__(self):
-        self.current_tab    = 0
-        self.tab_buttons    = []
-        self.tab_panels     = []
-        self.tab_instances  = {}
-        self.info_text      = None
-        self.info_frame     = None
-        self.status_text    = None
-        self.content_parent = None
-        self.script_job_id  = None
-        self.current_mesh   = None
+        self.current_tab      = 0
+        self.tab_buttons      = []
+        self.tab_panels       = []
+        self.tab_instances    = {}
+        self.info_text        = None
+        self.info_frame       = None
+        self.status_text      = None
+        self.content_parent   = None
+        self.script_job_id    = None
+        self.current_mesh     = None
+        self.scroll_layout    = None
+        self.skinning_layout  = None
     # endregion
 
     # region [04] CREATE WINDOW
@@ -73,41 +102,69 @@ class MainWindow:
 
         status_bar = self._build_status_bar(outer)
 
-        scroll = cmds.scrollLayout(
-            childResizable=True,
+        # Header + info box sit above both the scroll and skinning layouts
+        header_col = cmds.columnLayout(
+            adjustableColumn=True,
+            rowSpacing=0,
+            parent=outer,
             backgroundColor=Colors.BG_MAIN
         )
+        self._build_header(header_col)
+        self._build_info_box(header_col)
+        cmds.setParent(outer)
 
+        # scrollLayout for tabs 0–2
+        self.scroll_layout = cmds.scrollLayout(
+            childResizable=True,
+            backgroundColor=Colors.BG_MAIN,
+            parent=outer
+        )
         root = cmds.columnLayout(
             adjustableColumn=True,
             rowSpacing=0,
             backgroundColor=Colors.BG_MAIN
         )
-
-        self._build_header(root)
-        self._build_info_box(root)
         self._build_content_area(root)
+        cmds.setParent(outer)
 
+        # Skinning tab gets its own stretch-aware formLayout (shown only on tab 3)
+        self.skinning_layout = cmds.formLayout(
+            parent=outer,
+            backgroundColor=Colors.BG_MAIN,
+            visible=False
+        )
+        self._build_skinning_area(self.skinning_layout)
         cmds.setParent(outer)
 
         cmds.formLayout(
             outer, edit=True,
             attachForm=[
-                (scroll,     'top',    0),
-                (scroll,     'left',   0),
-                (scroll,     'right',  0),
-                (status_bar, 'left',   0),
-                (status_bar, 'right',  0),
-                (status_bar, 'bottom', 0),
+                (header_col,          'top',    0),
+                (header_col,          'left',   0),
+                (header_col,          'right',  0),
+                (self.scroll_layout,  'left',   0),
+                (self.scroll_layout,  'right',  0),
+                (self.skinning_layout,'left',   0),
+                (self.skinning_layout,'right',  0),
+                (status_bar,          'left',   0),
+                (status_bar,          'right',  0),
+                (status_bar,          'bottom', 0),
             ],
             attachControl=[
-                (scroll, 'bottom', 0, status_bar),
+                (self.scroll_layout,   'top',    0, header_col),
+                (self.scroll_layout,   'bottom', 0, status_bar),
+                (self.skinning_layout, 'top',    0, header_col),
+                (self.skinning_layout, 'bottom', 0, status_bar),
             ]
         )
 
         self._switch_tab(0)
         self._start_selection_job()
         self._update_status()
+
+        # Auto-dock alongside NGSkinTools2 if it is already open
+        if cmds.workspaceControl(NGST2_DOCK, q=True, exists=True):
+            cmds.evalDeferred(lambda: self._dock_to_ngst2())
     # endregion
 
     # region [05] HEADER — tab bar + help button
@@ -180,6 +237,12 @@ class MainWindow:
             parent=help_menu,
             command=lambda x: self._open_url(REPO_URL + "/releases")
         )
+        cmds.menuItem(divider=True, parent=help_menu)
+        cmds.menuItem(
+            label="Dock to NGSkinTools2",
+            parent=help_menu,
+            command=lambda x: self._dock_to_ngst2()
+        )
 
         cmds.setParent('..')
         cmds.separator(height=2, style='in', parent=parent)
@@ -190,7 +253,7 @@ class MainWindow:
         self.info_frame = cmds.frameLayout(
             label="Info",
             collapsable=True,
-            collapse=False,
+            collapse=True,
             parent=parent,
             backgroundColor=Colors.BG_DARK,
             marginWidth=Dimensions.PADDING_INNER,
@@ -241,6 +304,9 @@ class MainWindow:
                 instance.build()
                 self.tab_instances[i] = instance
 
+            elif tab["label"] == "Skinning":
+                pass  # Skinning tab is built separately in _build_skinning_area
+
             else:
                 self._build_placeholder(tab["label"])
 
@@ -248,7 +314,39 @@ class MainWindow:
             self.tab_panels.append(panel)
     # endregion
 
-    # region [08] PLACEHOLDER CONTENT
+    # region [08] SKINNING AREA — PySide2 widget embedded in cmds formLayout
+    def _build_skinning_area(self, parent_form):
+        from ui.skinning_tab import SkinningTab
+        skinning_idx = next(i for i, t in enumerate(TABS) if t["label"] == "Skinning")
+
+        try:
+            import maya.OpenMayaUI as omui
+            try:
+                import shiboken2
+                from PySide2.QtWidgets import QWidget
+            except ImportError:
+                import shiboken6 as shiboken2  # noqa: F401
+                from PySide6.QtWidgets import QWidget
+
+            ptr = omui.MQtUtil.findLayout(parent_form)
+            qt_parent = shiboken2.wrapInstance(int(ptr), QWidget)
+
+            instance = SkinningTab(self._get_current_mesh, parent=qt_parent)
+            instance.build()
+            instance.setGeometry(0, 0, qt_parent.width(), qt_parent.height())
+            _ResizeFilter(instance, qt_parent)
+
+        except Exception as e:
+            import traceback
+            print(f"[NGBuddy] Could not embed skinning tab: {e}")
+            traceback.print_exc()
+            instance = SkinningTab(self._get_current_mesh)
+            instance.build()
+
+        self.tab_instances[skinning_idx] = instance
+    # endregion
+
+    # region [09] PLACEHOLDER CONTENT
     def _build_placeholder(self, tab_label):
         cmds.separator(height=Dimensions.SECTION_SPACING, style='none')
         cmds.text(
@@ -260,7 +358,7 @@ class MainWindow:
         cmds.separator(height=Dimensions.SECTION_SPACING, style='none')
     # endregion
 
-    # region [09] STATUS BAR — pinned to bottom
+    # region [10] STATUS BAR — pinned to bottom
     def _build_status_bar(self, parent):
         bar = cmds.columnLayout(
             adjustableColumn=True,
@@ -293,7 +391,15 @@ class MainWindow:
     # region [10] TAB SWITCHING
     def _switch_tab(self, index):
         self.current_tab = index
+        is_skinning = (TABS[index]["label"] == "Skinning")
 
+        # Toggle scroll vs skinning layout
+        if self.scroll_layout and cmds.scrollLayout(self.scroll_layout, exists=True):
+            cmds.scrollLayout(self.scroll_layout, edit=True, visible=not is_skinning)
+        if self.skinning_layout and cmds.formLayout(self.skinning_layout, exists=True):
+            cmds.formLayout(self.skinning_layout, edit=True, visible=is_skinning)
+
+        # Show/hide individual scroll-based tab panels
         for i, panel in enumerate(self.tab_panels):
             cmds.columnLayout(panel, edit=True, visible=(i == index))
 
@@ -303,6 +409,13 @@ class MainWindow:
 
         if self.info_text and cmds.text(self.info_text, exists=True):
             cmds.text(self.info_text, edit=True, label=TABS[index]["info"])
+
+        # Notify skinning tab on activation so it can refresh live state
+        skinning_idx = next((i for i, t in enumerate(TABS) if t["label"] == "Skinning"), None)
+        if skinning_idx is not None and skinning_idx in self.tab_instances:
+            inst = self.tab_instances[skinning_idx]
+            if is_skinning and hasattr(inst, 'on_activated'):
+                inst.on_activated()
     # endregion
 
     # region [11] SELECTION SCRIPTJOB
@@ -319,7 +432,26 @@ class MainWindow:
         selection = cmds.ls(selection=True, type='transform')
 
         if not selection:
-            self._set_status("No mesh selected", valid=False)
+            # Check if a component (vertex/face/edge) is selected — extract parent node
+            all_sel = cmds.ls(selection=True) or []
+            mesh = None
+            for item in all_sel:
+                if '.' in item:
+                    node = item.split('.')[0]
+                    if (cmds.objExists(node) and
+                            cmds.listRelatives(node, shapes=True, type='mesh')):
+                        mesh = node
+                        break
+            if not mesh:
+                self._set_status("No mesh selected", valid=False)
+                return
+            history = cmds.listHistory(mesh) or []
+            skin_clusters = cmds.ls(history, type='skinCluster')
+            if not skin_clusters:
+                self._set_status(f"{mesh}  |  no skinCluster", valid=False)
+                return
+            self.current_mesh = mesh
+            self._set_status(f"{mesh}  |  {skin_clusters[0]}", valid=True)
             return
 
         mesh = selection[0]
@@ -369,4 +501,14 @@ class MainWindow:
     def _open_url(self, url):
         import webbrowser
         webbrowser.open(url)
+
+    def _dock_to_ngst2(self):
+        if not cmds.workspaceControl(NGST2_DOCK, q=True, exists=True):
+            cmds.confirmDialog(
+                title="NGBuddy",
+                message="NGSkinTools2 is not open. Open it first, then dock.",
+                button=["OK"]
+            )
+            return
+        cmds.workspaceControl(WINDOW_NAME, edit=True, dockToControl=(NGST2_DOCK, 'right'))
     # endregion
