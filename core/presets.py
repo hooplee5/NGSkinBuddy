@@ -439,7 +439,12 @@ class WeightManager:
             return False
 
     def open_folder(self):
-        """Open the weights folder in Windows Explorer."""
-        import subprocess
-        subprocess.Popen(f'explorer "{os.path.normpath(self.weight_dir)}"')
+        import sys, subprocess
+        path = os.path.normpath(self.weight_dir)
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
 # endregion

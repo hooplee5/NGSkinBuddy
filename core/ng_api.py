@@ -4,13 +4,15 @@ from core.presets import LayerNode
 # endregion
 
 # region [02] CONSTANTS
-from ngSkinTools2.api import MirrorOptions
-
-MIRROR_DIRECTION_MAP = {
-    "positiveToNegative": MirrorOptions.directionPositiveToNegative,
-    "negativeToPositive": MirrorOptions.directionNegativeToPositive,
-    "flip":               MirrorOptions.directionFlip,
-}
+try:
+    from ngSkinTools2.api import MirrorOptions
+    MIRROR_DIRECTION_MAP = {
+        "positiveToNegative": MirrorOptions.directionPositiveToNegative,
+        "negativeToPositive": MirrorOptions.directionNegativeToPositive,
+        "flip":               MirrorOptions.directionFlip,
+    }
+except Exception:
+    MIRROR_DIRECTION_MAP = {}
 # endregion
 
 
@@ -192,16 +194,6 @@ def _apply_locked_influences(mesh, layer, locked_influence_names):
         print(f"[NGBuddy] Warning: could not lock influences on layer '{layer.name}': {e}")
 
 
-def get_influence_list(mesh):
-    """Return list of influence names on the skinCluster of a mesh."""
-    try:
-        skin_cluster = get_skin_cluster(mesh)
-        if not skin_cluster:
-            return []
-        return cmds.skinCluster(skin_cluster, query=True, influence=True) or []
-    except Exception as e:
-        print(f"[NGBuddy] Error getting influences for '{mesh}': {e}")
-        return []
 # endregion
 
 

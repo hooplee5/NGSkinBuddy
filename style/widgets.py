@@ -58,7 +58,6 @@ class Widgets:
 
     @staticmethod
     def label(text, secondary=False):
-        color = Colors.TEXT_SECONDARY if secondary else Colors.TEXT_PRIMARY
         cmds.text(
             label=text,
             align='left',

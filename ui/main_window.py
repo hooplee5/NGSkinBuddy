@@ -5,7 +5,8 @@ from style.dimensions import Dimensions
 # endregion
 
 # region [02] CONSTANTS
-WINDOW_NAME  = "NGBuddyWorkspaceControl"
+WINDOW_NAME      = "NGBuddyWorkspaceControl"
+_SEL_JOB_OPVAR   = "NGBuddy_sel_sj_id"
 WINDOW_LABEL = "NGBuddy"
 VERSION      = "v0.1"
 REPO_URL     = "https://github.com/kaijutd/NGSkinBuddy"
@@ -37,33 +38,41 @@ TABS = [
 
 
 class _ResizeFilter:
-    """Forwards resize events from a cmds-managed Qt widget to a PySide2 child widget."""
+    """Keeps a PySide child widget filling its cmds-managed Qt parent on resize."""
     def __init__(self, child, parent_widget):
-        self._child = child
-        self._parent = parent_widget
-
         try:
-            from PySide2.QtCore import QObject, QEvent
-        except ImportError:
             from PySide6.QtCore import QObject, QEvent
+        except ImportError:
+            from PySide2.QtCore import QObject, QEvent
+
+        _child = child
+        _parent = parent_widget
 
         class _Filter(QObject):
-            def __init__(self2, child, parent_widget):
-                super().__init__(parent_widget)
-                self2._child = child
-                self2._parent = parent_widget
-
-            def eventFilter(self2, obj, event):
+            def eventFilter(self, _obj, event):
                 if event.type() == QEvent.Resize:
-                    self2._child.setGeometry(0, 0,
-                        self2._parent.width(), self2._parent.height())
+                    _child.setGeometry(0, 0, _parent.width(), _parent.height())
                 return False
 
-        self._filter = _Filter(child, parent_widget)
+        self._filter = _Filter(_parent)
         parent_widget.installEventFilter(self._filter)
 
 
 class MainWindow:
+
+    _active_skinning_tab = None   # class-level so teardown survives instance replacement
+
+    @staticmethod
+    def _kill_stale_sel_job():
+        """Kill any SelectionChanged scriptJob left over from a previous MainWindow."""
+        try:
+            if cmds.optionVar(exists=_SEL_JOB_OPVAR):
+                stale_id = cmds.optionVar(q=_SEL_JOB_OPVAR)
+                if isinstance(stale_id, int) and cmds.scriptJob(exists=stale_id):
+                    cmds.scriptJob(kill=stale_id, force=True)
+                cmds.optionVar(remove=_SEL_JOB_OPVAR)
+        except Exception:
+            pass
 
     # region [03] INIT
     def __init__(self):
@@ -83,6 +92,13 @@ class MainWindow:
 
     # region [04] CREATE WINDOW
     def create(self):
+        MainWindow._kill_stale_sel_job()
+        if MainWindow._active_skinning_tab is not None:
+            try:
+                MainWindow._active_skinning_tab.teardown()
+            except Exception:
+                pass
+            MainWindow._active_skinning_tab = None
         if cmds.workspaceControl(WINDOW_NAME, exists=True):
             cmds.deleteUI(WINDOW_NAME)
 
@@ -162,9 +178,8 @@ class MainWindow:
         self._start_selection_job()
         self._update_status()
 
-        # Auto-dock alongside NGSkinTools2 if it is already open
-        if cmds.workspaceControl(NGST2_DOCK, q=True, exists=True):
-            cmds.evalDeferred(lambda: self._dock_to_ngst2())
+        # Open NGSkinTools2 if needed, then dock alongside it
+        cmds.evalDeferred(lambda: self._ensure_ngst2_open_and_dock())
     # endregion
 
     # region [05] HEADER — tab bar + help button
@@ -322,19 +337,19 @@ class MainWindow:
         try:
             import maya.OpenMayaUI as omui
             try:
-                import shiboken2
-                from PySide2.QtWidgets import QWidget
-            except ImportError:
-                import shiboken6 as shiboken2  # noqa: F401
+                import shiboken6 as shiboken
                 from PySide6.QtWidgets import QWidget
+            except ImportError:
+                import shiboken2 as shiboken  # noqa: F401
+                from PySide2.QtWidgets import QWidget
 
             ptr = omui.MQtUtil.findLayout(parent_form)
-            qt_parent = shiboken2.wrapInstance(int(ptr), QWidget)
+            qt_parent = shiboken.wrapInstance(int(ptr), QWidget)
 
             instance = SkinningTab(self._get_current_mesh, parent=qt_parent)
             instance.build()
             instance.setGeometry(0, 0, qt_parent.width(), qt_parent.height())
-            _ResizeFilter(instance, qt_parent)
+            self._resize_filter = _ResizeFilter(instance, qt_parent)
 
         except Exception as e:
             import traceback
@@ -344,6 +359,7 @@ class MainWindow:
             instance.build()
 
         self.tab_instances[skinning_idx] = instance
+        MainWindow._active_skinning_tab = instance
     # endregion
 
     # region [09] PLACEHOLDER CONTENT
@@ -388,7 +404,7 @@ class MainWindow:
         return bar
     # endregion
 
-    # region [10] TAB SWITCHING
+    # region [11] TAB SWITCHING
     def _switch_tab(self, index):
         self.current_tab = index
         is_skinning = (TABS[index]["label"] == "Skinning")
@@ -424,6 +440,7 @@ class MainWindow:
             event=["SelectionChanged", self._update_status],
             protected=False
         )
+        cmds.optionVar(intValue=(_SEL_JOB_OPVAR, self.script_job_id))
 
     def _update_status(self):
         if not self.status_text or not cmds.text(self.status_text, exists=True):
@@ -511,4 +528,40 @@ class MainWindow:
             )
             return
         cmds.workspaceControl(WINDOW_NAME, edit=True, dockToControl=(NGST2_DOCK, 'right'))
+
+    def _ensure_ngst2_open_and_dock(self):
+        """Open NGSkinTools2 if not already running, then dock NGBuddy alongside it."""
+        if cmds.workspaceControl(NGST2_DOCK, q=True, exists=True):
+            self._dock_to_ngst2()
+            return
+
+        # Try to launch NGSkinTools2
+        launched = False
+        try:
+            import ngSkinTools2
+            ngSkinTools2.open_ui()
+            launched = True
+        except AttributeError:
+            # Older or differently structured installs may expose a different entry point
+            try:
+                from ngSkinTools2.ui.mainwindow import MainWindow as _NgMW
+                _NgMW.show()
+                launched = True
+            except Exception as e:
+                print(f"[NGBuddy] Could not open NGSkinTools2: {e}")
+        except ImportError:
+            print("[NGBuddy] NGSkinTools2 is not installed — skipping auto-dock.")
+
+        if launched:
+            # Defer dock until NGST2's workspace control is registered
+            cmds.evalDeferred(lambda: self._wait_and_dock(0))
+
+    def _wait_and_dock(self, attempt):
+        """Poll until NGST2's workspace control exists, then dock. Gives up after ~2 s."""
+        if cmds.workspaceControl(NGST2_DOCK, q=True, exists=True):
+            self._dock_to_ngst2()
+        elif attempt < 20:
+            cmds.evalDeferred(lambda: self._wait_and_dock(attempt + 1))
+        else:
+            print("[NGBuddy] Timed out waiting for NGSkinTools2 to open.")
     # endregion

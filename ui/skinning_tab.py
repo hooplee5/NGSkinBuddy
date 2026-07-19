@@ -5,15 +5,6 @@ import maya.cmds as cmds
 from style.colors import Colors
 
 try:
-    from PySide2 import QtWidgets, QtCore, QtGui
-    from PySide2.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QLabel, QToolButton, QPushButton,
-        QTreeWidget, QTreeWidgetItem, QSlider, QDoubleSpinBox, QScrollArea,
-        QAbstractItemView, QHeaderView, QFrame, QSizePolicy, QSplitter
-    )
-    from PySide2.QtCore import Qt, QSize
-    from PySide2.QtGui import QIcon, QColor
-except ImportError:
     from PySide6 import QtWidgets, QtCore, QtGui
     from PySide6.QtWidgets import (
         QWidget, QVBoxLayout, QHBoxLayout, QLabel, QToolButton, QPushButton,
@@ -21,7 +12,34 @@ except ImportError:
         QAbstractItemView, QHeaderView, QFrame, QSizePolicy, QSplitter
     )
     from PySide6.QtCore import Qt, QSize
-    from PySide6.QtGui import QIcon, QColor
+    from PySide6.QtGui import QIcon, QColor, QPixmap, QPainter, QPen
+    try:
+        import PySide6.QtSvg  # noqa: registers SVG image plugin so QIcon can load .svg files
+    except ImportError:
+        pass
+except ImportError:
+    from PySide2 import QtWidgets, QtCore, QtGui
+    from PySide2.QtWidgets import (
+        QWidget, QVBoxLayout, QHBoxLayout, QLabel, QToolButton, QPushButton,
+        QTreeWidget, QTreeWidgetItem, QSlider, QDoubleSpinBox, QScrollArea,
+        QAbstractItemView, QHeaderView, QFrame, QSizePolicy, QSplitter
+    )
+    from PySide2.QtCore import Qt, QSize
+    from PySide2.QtGui import QIcon, QColor, QPixmap, QPainter, QPen
+    try:
+        import PySide2.QtSvg  # noqa
+    except ImportError:
+        pass
+# endregion
+
+# region [01b] SHIBOKEN — widget validity guard
+try:
+    import shiboken6 as _shiboken
+except ImportError:
+    try:
+        import shiboken2 as _shiboken
+    except ImportError:
+        _shiboken = None
 # endregion
 
 # region [02] STYLE CONSTANTS
@@ -44,21 +62,72 @@ DEPTH_BG = [
     _hex([0.230, 0.216, 0.214]),
 ]
 
-ROW_H           = 24
-BTN_W           = 24
-COL2_W          = BTN_W * 3 + 6   # 3 buttons + padding
-S4_H            = 130
-THRESHOLD       = 0.001
-_VERT_JOB_OPVAR = "NGBuddy_vert_inspect_sj_id"
+ROW_H             = 24
+BTN_W             = 24
+COL2_W            = BTN_W * 4 + 8   # 4 buttons: lock + 1 + 0 + select
+S4_H              = 130
+THRESHOLD         = 0.001
+_VERT_JOB_OPVAR   = "NGBuddy_vert_inspect_sj_id"
+_INSP_MAX_VERTS   = 20   # cap for vertex inspector display
 # endregion
 
-# region [03] LAZY ICONS — loaded once, after Qt is ready
+# region [03] ICONS — Qt resources + NGST2 bundled SVGs
 _ICONS = {}
 
 def _icon(name):
     if name not in _ICONS:
         _ICONS[name] = QIcon(name)
     return _ICONS[name]
+
+def _ngst_icon(filename, size=16):
+    """Load a bundled NGST2 SVG via QSvgRenderer -> QPixmap (works without SVG image plugin)."""
+    key = f"__ngst__{filename}"
+    if key not in _ICONS:
+        try:
+            import ngSkinTools2.ui as _nui
+            path = os.path.join(os.path.dirname(_nui.__file__), "images", filename)
+            if not os.path.exists(path):
+                _ICONS[key] = QIcon()
+            else:
+                try:
+                    try:
+                        from PySide6.QtSvg import QSvgRenderer
+                        from PySide6.QtGui import QPixmap, QPainter
+                        from PySide6.QtCore import Qt
+                    except ImportError:
+                        from PySide2.QtSvg import QSvgRenderer
+                        from PySide2.QtGui import QPixmap, QPainter
+                        from PySide2.QtCore import Qt
+                    renderer = QSvgRenderer(path)
+                    pm = QPixmap(size, size)
+                    pm.fill(Qt.transparent)
+                    painter = QPainter(pm)
+                    renderer.render(painter)
+                    painter.end()
+                    _ICONS[key] = QIcon(pm)
+                except Exception:
+                    _ICONS[key] = QIcon(path)  # fallback: direct load
+        except Exception:
+            _ICONS[key] = QIcon()
+    return _ICONS[key]
+def _make_muted_icon(base_icon, size=20):
+    """Eye icon with a red diagonal slash drawn over it — muted layer state."""
+    try:
+        pm = base_icon.pixmap(size, size)
+        if pm.isNull():
+            return base_icon
+        result = QPixmap(pm)
+        p = QPainter(result)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(ERROR))
+        pen.setWidth(2)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        p.drawLine(size - 3, 3, 3, size - 3)  # top-right to bottom-left
+        p.end()
+        return QIcon(result)
+    except Exception:
+        return base_icon
 # endregion
 
 # region [04] SIGNAL BLOCKER helper
@@ -86,13 +155,14 @@ class SkinningTab(QWidget):
         self._opacity_spinner = None
         self._opacity_slider  = None
         self._infl_label      = None
-        self._lock_btn        = None
         self._pre_mask_infl   = None
 
         # Section 2
-        self._tree        = None
-        self._tree_items  = {}   # infl_idx (int) -> QTreeWidgetItem
-        self._mask_item   = None
+        self._tree         = None
+        self._tree_items   = {}   # infl_idx (int) -> QTreeWidgetItem
+        self._mask_item    = None
+        self._lock_btn_map = {}   # infl_idx (int) -> QToolButton
+        self._locked_infls = set()
 
         # Section 3
         self._pose_labels       = {}
@@ -167,10 +237,24 @@ class SkinningTab(QWidget):
 
         r1.addWidget(self._small_label("Layer:"))
 
-        self._mute_btn = self._tool_btn(
-            icon=":/RS_visible_icon.png", text="●",
-            tooltip="Mute / unmute this layer",
-            checkable=True, checked_style=f"background-color: {ERROR};"
+        self._mute_btn = QToolButton()
+        self._mute_btn.setFixedSize(BTN_W, ROW_H)
+        self._mute_btn.setCheckable(True)
+        self._mute_btn.setToolTip("Mute / unmute this layer")
+        _eye_on = _ngst_icon("eye-fill.svg", size=20)
+        if not _eye_on.isNull():
+            _eye_off = _make_muted_icon(_eye_on, size=20)
+            self._mute_btn.setIcon(_eye_on)
+            self._mute_btn.setIconSize(QSize(20, 20))
+            self._mute_btn._icon_on  = _eye_on
+            self._mute_btn._icon_off = _eye_off
+        else:
+            self._mute_btn.setText("●")
+            self._mute_btn._icon_on  = None
+            self._mute_btn._icon_off = None
+        self._mute_btn.setStyleSheet(
+            f"QToolButton {{ background: {BG_ELEMENT}; border: none; color: #ccc; }}"
+            f"QToolButton:checked {{ background: {ERROR}; }}"
         )
         self._mute_btn.clicked.connect(self._on_mute_toggle)
         r1.addWidget(self._mute_btn)
@@ -189,38 +273,37 @@ class SkinningTab(QWidget):
 
         self._opacity_slider = QSlider(Qt.Horizontal)
         self._opacity_slider.setRange(0, 100)
-        self._opacity_slider.setFixedHeight(ROW_H)
+        self._opacity_slider.setFixedHeight(ROW_H - 4)
         self._opacity_slider.setMinimumWidth(50)
         self._opacity_slider.setToolTip("Layer opacity")
-        r1.addWidget(self._opacity_slider, stretch=1)
+        slider_frame = QFrame()
+        slider_frame.setStyleSheet(
+            f"QFrame {{ background: {BG_DARK}; border-radius: 3px; }}"
+        )
+        sf_lay = QHBoxLayout(slider_frame)
+        sf_lay.setContentsMargins(4, 2, 4, 2)
+        sf_lay.addWidget(self._opacity_slider)
+        r1.addWidget(slider_frame, stretch=1)
 
         self._opacity_spinner.valueChanged.connect(self._on_opacity_spinner_changed)
         self._opacity_slider.valueChanged.connect(self._on_opacity_slider_changed)
 
         lay.addLayout(r1)
 
-        # ── Row 2: Influence ─────────────────────��────────────────────────
+        # ── Row 2: Influence ─────────────────────────────────────────────
         r2 = QHBoxLayout()
         r2.setSpacing(3)
 
         r2.addWidget(self._small_label("Infl:"))
 
-        self._lock_btn = QToolButton()
-        self._lock_btn.setFixedSize(BTN_W, ROW_H)
-        self._lock_btn.setIcon(_icon(":/Lock_OFF_grey.png"))
-        self._lock_btn.setToolTip("Hold / release this influence")
-        self._lock_btn.setCheckable(True)
-        self._lock_btn.setStyleSheet(
-            f"QToolButton {{ background-color: {BG_ELEMENT}; border: none; }}"
-            f"QToolButton:checked {{ background-color: {ACCENT}; }}"
-        )
-        self._lock_btn.clicked.connect(self._on_lock_toggle)
-        r2.addWidget(self._lock_btn)
-
         self._infl_label = self._info_label("  —")
         r2.addWidget(self._infl_label, stretch=1)
 
-        swap = self._tool_btn(text="⇄", tooltip="Swap paint target between influence and mask")
+        swap = QPushButton("Swap Mask/Joint")
+        swap.setFixedHeight(ROW_H)
+        swap.setMinimumWidth(120)
+        swap.setToolTip("Swap paint target between influence and mask")
+        swap.setStyleSheet(self._push_btn_style())
         swap.clicked.connect(self._on_mask_swap)
         r2.addWidget(swap)
 
@@ -248,7 +331,7 @@ class SkinningTab(QWidget):
         lh.setStyleSheet(f"color: #cccccc; font-weight: bold; background: transparent;")
         hl.addWidget(lh, stretch=1)
 
-        for t, tip in (("1", "Flood column"), ("0", "Zero column"), ("↗", "Select verts")):
+        for t in ("🔒", "1", "0", "↗"):
             lb = QLabel(t)
             lb.setAlignment(Qt.AlignCenter)
             lb.setFixedWidth(BTN_W)
@@ -324,28 +407,55 @@ class SkinningTab(QWidget):
         hl.setContentsMargins(1, 1, 1, 1)
         hl.setSpacing(1)
 
-        b1 = QToolButton(); b1.setText("1"); b1.setFixedSize(BTN_W - 2, ROW_H - 2)
-        b1.setStyleSheet(f"QToolButton {{ background: {BG_ELEMENT}; border: none; color: #ccc; }}")
+        # ── Lock / Unlock ────────────────────────────────────────────────
+        bl = QToolButton(); bl.setFixedSize(BTN_W - 2, ROW_H - 2)
+        bl.setCheckable(True)
+        if is_mask:
+            bl.setEnabled(False)
+            bl.setIcon(_icon(":/Lock_OFF_grey.png"))
+        else:
+            bl.setIcon(_icon(":/Lock_OFF_grey.png"))
+            bl.setToolTip("Lock / unlock this influence")
+            bl.setStyleSheet(
+                f"QToolButton {{ background: {BG_ELEMENT}; border: none; }}"
+                f"QToolButton:checked {{ background: {ACCENT}; }}"
+            )
+            bl.clicked.connect(lambda _=False, i=infl_idx: self._on_lock_row(i))
+            self._lock_btn_map[infl_idx] = bl
+        hl.addWidget(bl)
+
+        # ── Flood Full / Zero ────────────────────────────────────────────
+        b1 = QToolButton(); b1.setFixedSize(BTN_W + 2, ROW_H - 2)
+        b1.setText("Full")
         b1.setToolTip("Flood to 1.0")
+        b1.setStyleSheet(
+            "QToolButton { background: #2d4a50; border: none; color: #cccccc; font-size: 9px; }"
+            "QToolButton:hover { background: #3a5f68; }"
+        )
         if is_mask:
             b1.clicked.connect(lambda: self._on_flood_mask(1.0))
         else:
             b1.clicked.connect(lambda _=False, i=infl_idx: self._on_flood_infl(i, 1.0))
         hl.addWidget(b1)
 
-        b0 = QToolButton(); b0.setText("0"); b0.setFixedSize(BTN_W - 2, ROW_H - 2)
-        b0.setStyleSheet(f"QToolButton {{ background: {BG_ELEMENT}; border: none; color: #ccc; }}")
+        b0 = QToolButton(); b0.setFixedSize(BTN_W + 2, ROW_H - 2)
+        b0.setText("Zero")
         b0.setToolTip("Flood to 0.0")
+        b0.setStyleSheet(
+            f"QToolButton {{ background: {BG_ELEMENT}; border: none; color: #ccc; font-size: 9px; }}"
+            f"QToolButton:hover {{ background: #505050; }}"
+        )
         if is_mask:
             b0.clicked.connect(lambda: self._on_flood_mask(0.0))
         else:
             b0.clicked.connect(lambda _=False, i=infl_idx: self._on_flood_infl(i, 0.0))
         hl.addWidget(b0)
 
+        # ── Select influenced verts ──────────────────────────────────────
         bs = QToolButton(); bs.setFixedSize(BTN_W - 2, ROW_H - 2)
-        bs.setIcon(_icon(":/aselect.png"))
+        bs.setText(chr(0x2316))  # position-indicator cross (confirmed visible)
         bs.setToolTip("Select influenced verts")
-        bs.setStyleSheet(f"QToolButton {{ background: {BG_ELEMENT}; border: none; }}")
+        bs.setStyleSheet(f"QToolButton {{ background: {BG_ELEMENT}; border: none; color: #aaa; }}")
         if is_mask:
             bs.clicked.connect(self._on_select_verts_by_mask)
         else:
@@ -395,14 +505,28 @@ class SkinningTab(QWidget):
             self._pose_labels[slot] = lbl
             sl.addWidget(lbl)
 
-            sv = QPushButton("Save")
+            sv = QPushButton()
             sv.setFixedHeight(BTN_H)
+            sv.setToolTip("Save pose")
+            _sv_ic = _icon(":/save.png")
+            if not _sv_ic.isNull():
+                sv.setIcon(_sv_ic)
+                sv.setIconSize(QSize(BTN_H - 4, BTN_H - 4))
+            else:
+                sv.setText("Save")
             sv.setStyleSheet(self._push_btn_style())
             sv.clicked.connect(lambda _=False, s=slot: self._on_save_pose(s))
             sl.addWidget(sv)
 
-            ld = QPushButton("Load")
+            ld = QPushButton()
             ld.setFixedHeight(BTN_H)
+            ld.setToolTip("Load pose")
+            _ld_ic = _icon(":/playblast.png")
+            if not _ld_ic.isNull():
+                ld.setIcon(_ld_ic)
+                ld.setIconSize(QSize(BTN_H - 4, BTN_H - 4))
+            else:
+                ld.setText("Load")
             ld.setStyleSheet(self._push_btn_style())
             ld.clicked.connect(lambda _=False, s=slot: self._on_recall_pose(s))
             sl.addWidget(ld)
@@ -559,34 +683,57 @@ class SkinningTab(QWidget):
         self._ngst_events_connected = False
 
     def _on_ngst_layer_changed(self, *_):
-        if self._enabled:
+        self._pre_mask_infl = None
+        try:
+            self._update_active_indicator()  # tree first — ground truth
             self._refresh_section1()
-            self._update_active_indicator()
+        except Exception as e:
+            if "already deleted" not in str(e):
+                print(f"[NGBuddy] layer-changed handler error: {type(e).__name__}: {e}")
 
     def _on_ngst_infl_changed(self, *_):
-        if self._enabled:
+        try:
+            self._update_active_indicator()  # tree first — ground truth
             self._refresh_section1()
-            self._update_active_indicator()
+        except Exception as e:
+            if "already deleted" not in str(e):
+                print(f"[NGBuddy] infl-changed handler error: {type(e).__name__}: {e}")
     # endregion
+
+    def _sync_infl_label_from_tree(self):
+        """Read the currently selected tree item and push its name to the Infl label."""
+        if not self._infl_label:
+            return
+        infl_name = "—"
+        if self._tree:
+            cur = self._tree.currentItem()
+            if cur:
+                data = cur.data(0, Qt.UserRole)
+                if data == "mask":
+                    infl_name = "Mask"
+                    self._current_infl_idx = None
+                elif isinstance(data, int):
+                    infl_name = cur.text(0).strip()
+                    self._current_infl_idx = data
+        self._infl_label.setText(f"  {infl_name}")
 
     # region [13] REFRESH METHODS
     def _refresh_section1(self):
-        mesh = self._get_mesh()
-        if not mesh:
-            if self._layer_label:
-                self._layer_label.setText("  —")
-            if self._infl_label:
-                self._infl_label.setText("  —")
-            return
         try:
-            from ngSkinTools2.api import Layers, NamedPaintTarget
+            mesh = self._get_mesh()
+            if not mesh:
+                if self._layer_label:
+                    self._layer_label.setText("  —")
+                self._sync_infl_label_from_tree()
+                return
+
+            from ngSkinTools2.api import Layers
             layer = Layers(mesh).current_layer()
             if not layer:
                 self._current_layer_id = None
                 if self._layer_label:
                     self._layer_label.setText("  —")
-                if self._infl_label:
-                    self._infl_label.setText("  —")
+                self._sync_infl_label_from_tree()
                 return
 
             self._current_layer_id = layer.id
@@ -594,13 +741,8 @@ class SkinningTab(QWidget):
             if self._layer_label:
                 self._layer_label.setText(f"  {layer.name}")
 
-            # Mute
-            muted = not layer.enabled
-            if self._mute_btn:
-                with _Blocker(self._mute_btn):
-                    self._mute_btn.setChecked(muted)
+            self._sync_mute_btn(not layer.enabled)
 
-            # Opacity — sync without triggering callbacks
             opacity = layer.opacity
             if self._opacity_spinner:
                 with _Blocker(self._opacity_spinner):
@@ -609,38 +751,14 @@ class SkinningTab(QWidget):
                 with _Blocker(self._opacity_slider):
                     self._opacity_slider.setValue(int(opacity * 100))
 
-            # Influence name
-            paint_targets = layer.paint_targets or []
-            self._current_infl_idx = paint_targets[0] if paint_targets else None
+            self._sync_infl_label_from_tree()
 
-            infl_name = "—"
-            if NamedPaintTarget.MASK in paint_targets:
-                infl_name = "Mask"
-            elif paint_targets:
-                infl_idx = paint_targets[0]
-                from core.ng_api import get_skin_cluster
-                sc = get_skin_cluster(mesh)
-                if sc and isinstance(infl_idx, int):
-                    infls = cmds.skinCluster(sc, q=True, influence=True) or []
-                    if infl_idx < len(infls):
-                        infl_name = infls[infl_idx]
-
-            if self._infl_label:
-                self._infl_label.setText(f"  {infl_name}")
-
-            # Lock button
-            locked_infls = list(layer.locked_influences or [])
-            is_locked = isinstance(self._current_infl_idx, int) and \
-                        self._current_infl_idx in locked_infls
-            if self._lock_btn:
-                with _Blocker(self._lock_btn):
-                    self._lock_btn.setChecked(is_locked)
-                self._lock_btn.setIcon(
-                    _icon(":/Lock_ON.png") if is_locked else _icon(":/Lock_OFF_grey.png")
-                )
+            self._locked_infls = set(layer.locked_influences or [])
+            self._update_lock_buttons()
 
         except Exception as e:
-            print(f"[NGBuddy] Error refreshing S1: {e}")
+            if "already deleted" not in str(e):
+                print(f"[NGBuddy] Error refreshing S1: {e}")
 
     @staticmethod
     def _sort_influences_hierarchically(influences):
@@ -671,8 +789,9 @@ class SkinningTab(QWidget):
     def _rebuild_joint_list(self):
         if self._tree:
             self._tree.clear()
-        self._tree_items = {}
-        self._mask_item  = None
+        self._tree_items   = {}
+        self._lock_btn_map = {}
+        self._mask_item    = None
 
         mesh = self._get_mesh()
         self._last_mesh = mesh
@@ -703,6 +822,7 @@ class SkinningTab(QWidget):
 
             self._tree.expandAll()
             self._update_active_indicator()
+            self._update_lock_buttons()
 
         except Exception as e:
             print(f"[NGBuddy] Error rebuilding joint list: {e}")
@@ -741,9 +861,11 @@ class SkinningTab(QWidget):
     def _refresh_vertex_inspector(self):
         try:
             self._refresh_vertex_inspector_inner()
-        except RuntimeError:
-            # Qt objects deleted (window rebuilt while scriptJob was still alive)
-            self._kill_vert_job()
+        except Exception as e:
+            if "already deleted" in str(e):
+                self._kill_vert_job()
+            else:
+                print(f"[NGBuddy] Error in vertex inspector: {e}")
 
     def _refresh_vertex_inspector_inner(self):
         if not self._vert_layout or not self._vert_container:
@@ -755,8 +877,20 @@ class SkinningTab(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-        mesh     = self._get_mesh()
-        sel      = cmds.ls(selection=True, flatten=True) or []
+        mesh = self._get_mesh()
+        sel  = cmds.ls(selection=True, flatten=True) or []
+
+        # If the stored mesh is stale/empty (SelectionChanged race), derive it from
+        # the component selection so the inspector doesn't flicker "No mesh selected."
+        if not mesh:
+            for _item in sel:
+                if '.' in _item:
+                    _node = _item.split('.')[0]
+                    if (cmds.objExists(_node) and
+                            cmds.listRelatives(_node, shapes=True, type='mesh')):
+                        mesh = _node
+                        break
+
         vert_strs = [v for v in sel if mesh and f"{mesh}.vtx[" in v]
 
         def _status(msg):
@@ -779,11 +913,19 @@ class SkinningTab(QWidget):
                 vert_indices.append(int(v.split('[')[1].rstrip(']')))
             except Exception:
                 pass
+        if not vert_indices:
+            return
 
+        total_n  = len(vert_indices)
+        capped   = total_n > _INSP_MAX_VERTS
+        vert_indices = vert_indices[:_INSP_MAX_VERTS]
         n = len(vert_indices)
+
+        mode_lbl = "Layer" if self._vert_mode == "layer" else "Final"
+        cap_note = f"  (showing {n} of {total_n})" if capped else ""
         if self._vert_header_lbl:
             self._vert_header_lbl.setText(
-                f"  Vertex Inspector  ({n} vert{'s' if n > 1 else ''})"
+                f"  Vertex Inspector  [{mode_lbl}]{cap_note}"
             )
 
         try:
@@ -796,83 +938,163 @@ class SkinningTab(QWidget):
             influences   = cmds.skinCluster(sc, q=True, influence=True) or []
             infl_idx_map = {name: i for i, name in enumerate(influences)}
 
-            if self._vert_mode == "layer":
-                weight_map = self._get_layer_weights_for_verts(mesh, influences, vert_indices, n)
-            else:
-                weight_map = self._get_final_weights_for_verts(mesh, sc, influences, vert_indices, n)
+            per_vert = self._get_weights_per_vert(mesh, sc, influences, vert_indices)
 
-            sorted_entries = sorted(weight_map.items(), key=lambda kv: kv[1], reverse=True)
-
-            if not sorted_entries:
+            any_weights = any(d for _, d in per_vert)
+            if not any_weights:
                 _status("  All weights below threshold.")
                 return
 
             insert_pos = 0
-            for infl_name, avg_w in sorted_entries:
-                infl_idx = infl_idx_map.get(infl_name, -1)
-                depth    = self._joint_depth_map.get(infl_name, 0)
-                bg       = DEPTH_BG[depth % len(DEPTH_BG)]
+            for vi, weight_dict in per_vert:
+                if not weight_dict:
+                    continue
 
-                row_w = QWidget()
-                row_w.setStyleSheet(f"background: {bg};")
-                row_h = QHBoxLayout(row_w)
-                row_h.setContentsMargins(4, 1, 4, 1)
-                row_h.setSpacing(4)
+                # ── Vert header ──────────────────────────────────────────
+                hdr = QWidget()
+                hdr.setStyleSheet(f"background: {BG_PANEL};")
+                hdr_lay = QHBoxLayout(hdr)
+                hdr_lay.setContentsMargins(4, 1, 4, 1)
+                hdr_lay.setSpacing(2)
 
-                lbl = QLabel(f" {infl_name}")
-                lbl.setStyleSheet(f"color: #cccccc; background: transparent;")
-                row_h.addWidget(lbl, stretch=1)
-
-                spin = QDoubleSpinBox()
-                spin.setRange(0.0, 1.0)
-                spin.setSingleStep(0.001)
-                spin.setDecimals(4)
-                spin.setValue(avg_w)
-                spin.setFixedSize(70, ROW_H - 4)
-                spin.setStyleSheet(self._spinbox_style())
-                spin.setToolTip(
-                    f"Drag or type to set {infl_name} weight (Layer mode only)"
+                sel_btn = QToolButton()
+                sel_btn.setFixedSize(ROW_H - 4, ROW_H - 4)
+                sel_btn.setText(chr(0x2316))  # position-indicator cross
+                sel_btn.setToolTip(f"Select vtx[{vi}] only")
+                sel_btn.setStyleSheet(
+                    f"QToolButton {{ background: {BG_ELEMENT}; border: none;"
+                    f"  color: #aaa; font-size: 10px; }}"
+                    f"QToolButton:hover {{ background: #505050; }}"
                 )
-                spin.valueChanged.connect(
-                    lambda v, nm=infl_name, idx=infl_idx: self._on_vert_weight_change(nm, idx, v)
+                sel_btn.clicked.connect(
+                    lambda _=False, _mesh=mesh, _vi=vi:
+                        cmds.select(f"{_mesh}.vtx[{_vi}]")
                 )
-                row_h.addWidget(spin)
+                hdr_lay.addWidget(sel_btn)
 
-                self._vert_layout.insertWidget(insert_pos, row_w)
+                hdr_lbl = QLabel(f"vtx[{vi}]")
+                hdr_lbl.setStyleSheet(
+                    "color: #aaaaaa; font-weight: bold; background: transparent;"
+                )
+                hdr_lay.addWidget(hdr_lbl, stretch=1)
+                self._vert_layout.insertWidget(insert_pos, hdr)
                 insert_pos += 1
 
+                # ── Influence rows ────────────────────────────────────────
+                for infl_name, w in sorted(weight_dict.items(),
+                                            key=lambda kv: kv[1], reverse=True):
+                    infl_idx = infl_idx_map.get(infl_name, -1)
+                    depth    = self._joint_depth_map.get(infl_name, 0)
+                    bg       = DEPTH_BG[depth % len(DEPTH_BG)]
+
+                    row_w = QWidget()
+                    row_w.setStyleSheet(f"background: {bg};")
+                    row_h = QHBoxLayout(row_w)
+                    row_h.setContentsMargins(16, 1, 4, 1)
+                    row_h.setSpacing(4)
+
+                    lbl = QLabel(infl_name)
+                    lbl.setStyleSheet("color: #cccccc; background: transparent;")
+                    row_h.addWidget(lbl, stretch=1)
+
+                    spin = QDoubleSpinBox()
+                    spin.setRange(0.0, 1.0)
+                    spin.setSingleStep(0.001)
+                    spin.setDecimals(4)
+                    spin.setValue(w)
+                    spin.setFixedSize(70, ROW_H - 4)
+                    spin.setStyleSheet(self._spinbox_style())
+                    editable = self._vert_mode == "layer"
+                    spin.setReadOnly(not editable)
+                    spin.setToolTip(
+                        f"Set {infl_name} weight for vtx[{vi}]" if editable
+                        else "Switch to Layer mode to edit"
+                    )
+                    if editable:
+                        spin.valueChanged.connect(
+                            lambda v, nm=infl_name, idx=infl_idx, _vi=vi:
+                                self._on_vert_weight_change_single(nm, idx, _vi, v)
+                        )
+                    row_h.addWidget(spin)
+
+                    self._vert_layout.insertWidget(insert_pos, row_w)
+                    insert_pos += 1
+
         except Exception as e:
-            print(f"[NGBuddy] Error refreshing vertex inspector: {e}")
+            import traceback
+            traceback.print_exc()
             _status(f"  Error: {e}")
     # endregion
 
     # region [14] WEIGHT HELPERS
-    def _get_final_weights_for_verts(self, mesh, sc, influences, vert_indices, n):
-        weight_sum = {}
-        for vi in vert_indices:
-            vals = cmds.skinPercent(sc, f"{mesh}.vtx[{vi}]", q=True, value=True) or []
-            for i, w in enumerate(vals):
-                if i < len(influences):
-                    weight_sum[influences[i]] = weight_sum.get(influences[i], 0.0) + w
-        return {infl: total / n for infl, total in weight_sum.items()
-                if total / n > self._vert_thresh}
+    def _get_weights_per_vert(self, mesh, sc, influences, vert_indices):
+        """Return [(vi, {infl_name: weight}), ...] — one entry per selected vert."""
+        result = []
 
-    def _get_layer_weights_for_verts(self, mesh, influences, vert_indices, n):
-        try:
-            from ngSkinTools2.api import Layers
-            layer = Layers(mesh).current_layer()
-            if not layer:
-                return {}
-            result = {}
-            for i, infl in enumerate(influences):
-                w_list = layer.get_weights(i) or []
-                total  = sum(w_list[vi] for vi in vert_indices if vi < len(w_list))
-                avg    = total / n
-                if avg > self._vert_thresh:
-                    result[infl] = avg
-            return result
-        except Exception:
-            return {}
+        if self._vert_mode == "layer":
+            try:
+                from ngSkinTools2.api import Layers
+                layer = Layers(mesh).current_layer()
+                if not layer:
+                    return [(vi, {}) for vi in vert_indices]
+
+                # Pre-fetch all influence weight arrays for this layer once
+                infl_arrays = {}
+                for i, infl in enumerate(influences):
+                    arr = layer.get_weights(i)
+                    if arr:
+                        infl_arrays[infl] = arr
+
+                for vi in vert_indices:
+                    vert_dict = {
+                        infl: arr[vi]
+                        for infl, arr in infl_arrays.items()
+                        if vi < len(arr) and arr[vi] > self._vert_thresh
+                    }
+                    result.append((vi, vert_dict))
+            except Exception as e:
+                print(f"[NGBuddy] Layer weight fetch error: {e}")
+                result = [(vi, {}) for vi in vert_indices]
+        else:
+            # Final mode: batch-fetch via Maya API 2.0 (single call, no per-vert loop)
+            try:
+                import maya.api.OpenMaya as om
+                import maya.api.OpenMayaAnim as oma
+
+                msel = om.MSelectionList()
+                msel.add(sc)
+                msel.add(mesh)
+                fn_skin  = oma.MFnSkinCluster(msel.getDependNode(0))
+                mesh_dag = msel.getDagPath(1)
+
+                comp_fn   = om.MFnSingleIndexedComponent()
+                vert_comp = comp_fn.create(om.MFn.kMeshVertComponent)
+                for vi in vert_indices:
+                    comp_fn.addElement(vi)
+
+                weights_flat, num_infls = fn_skin.getWeights(mesh_dag, vert_comp)
+                ni = int(num_infls)
+                for j, vi in enumerate(vert_indices):
+                    off = j * ni
+                    vert_dict = {
+                        influences[i]: float(weights_flat[off + i])
+                        for i in range(ni)
+                        if i < len(influences) and float(weights_flat[off + i]) > self._vert_thresh
+                    }
+                    result.append((vi, vert_dict))
+
+            except Exception as e:
+                print(f"[NGBuddy] Maya API weight fetch failed, falling back: {e}")
+                for vi in vert_indices:
+                    vals = cmds.skinPercent(sc, f"{mesh}.vtx[{vi}]", q=True, value=True) or []
+                    vert_dict = {
+                        influences[i]: w
+                        for i, w in enumerate(vals)
+                        if i < len(influences) and w > self._vert_thresh
+                    }
+                    result.append((vi, vert_dict))
+
+        return result
     # endregion
 
     # region [15] TREE CALLBACK
@@ -913,8 +1135,23 @@ class SkinningTab(QWidget):
             if not layer:
                 return
             layer.enabled = not layer.enabled
+            # Sync the button immediately — NGST2 doesn't emit a property-changed
+            # event for layer.enabled, so we can't rely on _refresh_layer_ui firing.
+            self._sync_mute_btn(not layer.enabled)
         except Exception as e:
             print(f"[NGBuddy] Error toggling mute: {e}")
+
+    def _sync_mute_btn(self, muted: bool):
+        """Update the mute button icon and checked state without waiting for NGST2 events."""
+        if not self._mute_btn:
+            return
+        with _Blocker(self._mute_btn):
+            self._mute_btn.setChecked(muted)
+        ic_on  = getattr(self._mute_btn, '_icon_on',  None)
+        ic_off = getattr(self._mute_btn, '_icon_off', None)
+        if ic_on and ic_off:
+            self._mute_btn.setIcon(ic_off if muted else ic_on)
+            self._mute_btn.setIconSize(QSize(20, 20))
 
     def _on_opacity_spinner_changed(self, value):
         with _Blocker(self._opacity_slider):
@@ -939,9 +1176,10 @@ class SkinningTab(QWidget):
         except Exception as e:
             print(f"[NGBuddy] Error setting opacity: {e}")
 
-    def _on_lock_toggle(self):
+    def _on_lock_row(self, infl_idx):
+        """Toggle lock state for a specific influence (called from per-row lock button)."""
         mesh = self._get_mesh()
-        if not mesh or self._current_infl_idx is None:
+        if not mesh:
             return
         try:
             from ngSkinTools2.api import Layers
@@ -950,22 +1188,27 @@ class SkinningTab(QWidget):
             if not layer:
                 return
             locked = list(layer.locked_influences or [])
-            if self._current_infl_idx in locked:
-                locked.remove(self._current_infl_idx)
+            if infl_idx in locked:
+                locked.remove(infl_idx)
             else:
-                locked.append(self._current_infl_idx)
+                locked.append(infl_idx)
             layer.locked_influences = locked
+            self._locked_infls = set(locked)
+            self._update_lock_buttons()
             if session.active():
                 session.events.influencesListUpdated.emit()
-            is_locked = self._current_infl_idx in locked
-            if self._lock_btn:
-                with _Blocker(self._lock_btn):
-                    self._lock_btn.setChecked(is_locked)
-                self._lock_btn.setIcon(
-                    _icon(":/Lock_ON.png") if is_locked else _icon(":/Lock_OFF_grey.png")
-                )
         except Exception as e:
-            print(f"[NGBuddy] Error toggling lock: {e}")
+            print(f"[NGBuddy] Error toggling lock for influence {infl_idx}: {e}")
+
+    def _update_lock_buttons(self):
+        """Sync all per-row lock button visuals to the current _locked_infls set."""
+        for infl_idx, btn in self._lock_btn_map.items():
+            is_locked = infl_idx in self._locked_infls
+            with _Blocker(btn):
+                btn.setChecked(is_locked)
+            btn.setIcon(
+                _icon(":/Lock_ON.png") if is_locked else _icon(":/Lock_OFF_grey.png")
+            )
 
     def _on_mask_swap(self):
         mesh = self._get_mesh()
@@ -1047,7 +1290,9 @@ class SkinningTab(QWidget):
                 return
             weights  = layer.get_weights(infl_idx) or []
             vert_sel = [f"{mesh}.vtx[{i}]" for i, w in enumerate(weights) if w > self._vert_thresh]
-            cmds.select(vert_sel) if vert_sel else cmds.select(clear=True)
+            if vert_sel:
+                cmds.select(vert_sel)
+            # no selection = do nothing (avoids confusing deselect)
         except Exception as e:
             print(f"[NGBuddy] Error selecting verts for {infl_name}: {e}")
 
@@ -1062,7 +1307,8 @@ class SkinningTab(QWidget):
                 return
             mask     = layer.get_weights(NamedPaintTarget.MASK) or []
             vert_sel = [f"{mesh}.vtx[{i}]" for i, w in enumerate(mask) if w > self._vert_thresh]
-            cmds.select(vert_sel) if vert_sel else cmds.select(clear=True)
+            if vert_sel:
+                cmds.select(vert_sel)
         except Exception as e:
             print(f"[NGBuddy] Error selecting verts by mask: {e}")
     # endregion
@@ -1154,13 +1400,10 @@ class SkinningTab(QWidget):
     # endregion
 
     # region [19] SECTION 4 CALLBACKS
-    def _on_vert_weight_change(self, infl_name, infl_idx, value):
+    def _on_vert_weight_change_single(self, infl_name, infl_idx, vert_idx, value):
+        """Edit weight for one specific vertex in layer mode."""
         mesh = self._get_mesh()
         if not mesh or infl_idx < 0:
-            return
-        sel       = cmds.ls(selection=True, flatten=True) or []
-        vert_idxs = [int(v.split('[')[1].rstrip(']')) for v in sel if f"{mesh}.vtx[" in v]
-        if not vert_idxs:
             return
         try:
             from ngSkinTools2.api import Layers
@@ -1169,12 +1412,11 @@ class SkinningTab(QWidget):
                 return
             n_verts = cmds.polyEvaluate(mesh, vertex=True)
             weights = list(layer.get_weights(infl_idx) or [0.0] * n_verts)
-            for vi in vert_idxs:
-                if vi < len(weights):
-                    weights[vi] = float(value)
+            if vert_idx < len(weights):
+                weights[vert_idx] = float(value)
             layer.set_weights(infl_idx, weights)
         except Exception as e:
-            print(f"[NGBuddy] Error setting vert weight for {infl_name}: {e}")
+            print(f"[NGBuddy] Error setting vtx[{vert_idx}] weight for {infl_name}: {e}")
 
     def _set_vert_mode(self, mode):
         self._vert_mode = mode
@@ -1267,10 +1509,13 @@ class SkinningTab(QWidget):
     # region [22] PUBLIC API
     def set_enabled(self, enabled):
         self._enabled = enabled
+        if not enabled:
+            self._pre_mask_infl = None
         if enabled:
             mesh = self._get_mesh()
             if mesh != self._last_mesh:
                 self._rebuild_joint_list()
+            self._update_active_indicator()
             self._refresh_section1()
             self._connect_ngst_events()
         else:
@@ -1287,8 +1532,9 @@ class SkinningTab(QWidget):
     def on_activated(self):
         self._last_mesh = None
         self._connect_ngst_events()
-        self._refresh_section1()
         self._rebuild_joint_list()
+        self._update_active_indicator()
+        self._refresh_section1()
         self._refresh_vertex_inspector()
 
     def teardown(self):

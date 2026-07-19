@@ -622,12 +622,12 @@ class UtilsTab:
             if has_ngst and tmp_path:
                 if restore_weights(mesh, tmp_path):
                     self._log(self.rebind_log, "Layer data restored")
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
                 else:
-                    self._log(self.rebind_log, "WARNING: Layer data restore failed")
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
+                    self._log(self.rebind_log, f"WARNING: Layer data restore failed — backup kept at: {tmp_path}")
 
             # 7. Remove unused influences
             if remove_unused:
@@ -787,7 +787,15 @@ class UtilsTab:
 
             sc       = get_skin_cluster(mesh)
             all_infl = cmds.skinCluster(sc, query=True, influence=True) or []
-            short_to_idx = {infl.split('|')[-1]: i for i, infl in enumerate(all_infl)}
+            _short_counts = {}
+            for _inf in all_infl:
+                _s = _inf.split('|')[-1]
+                _short_counts[_s] = _short_counts.get(_s, 0) + 1
+            short_to_idx = {
+                infl.split('|')[-1]: i
+                for i, infl in enumerate(all_infl)
+                if _short_counts[infl.split('|')[-1]] == 1
+            }
 
             sel_idx = cmds.optionMenu(self.layer_menu, query=True, select=True) - 1
             if sel_idx < 0 or sel_idx >= len(self._layer_id_map):
@@ -1216,12 +1224,12 @@ class UtilsTab:
             if has_ngst and tmp_path:
                 if restore_weights(mesh, tmp_path):
                     self._log(self.bake_log, "Layer data restored")
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
                 else:
-                    self._log(self.bake_log, "WARNING: Layer data restore failed")
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
+                    self._log(self.bake_log, f"WARNING: Layer data restore failed — backup kept at: {tmp_path}")
 
             refresh_ngst_ui(mesh)
             self._log(self.bake_log, "Done.")
