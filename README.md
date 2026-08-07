@@ -12,7 +12,7 @@ https://github.com/user-attachments/assets/fdb45d93-018b-41a4-a5d1-471942ea65d2
 
 
 
-Read below for how to use the tool, and a detailed breakdown of what each tab does.
+See below for how to use the tool, and a detailed breakdown of what each tab does.
 
 ---
 
