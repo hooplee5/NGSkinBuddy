@@ -16,17 +16,17 @@ TABS = [
     {
         "label":  "Build",
         "accent": Colors.ACCENT_BUILD,
-        "info":   "Set up your rig for skinning.\nBind your mesh, initialize NGSkin layers\nand establish your base layer stack."
+        "info":   "Set up your rig for skinning.\nInitialize NGSkin layers from a saved preset,\nor assign a saved initial weight preset."
     },
     {
         "label":  "Copy & Paste",
         "accent": Colors.ACCENT_COPYPASTE,
-        "info":   "Copy weights between meshes or layers.\nUse presets to transfer weights\nacross LODs or mesh variations."
+        "info":   "Copy weights between meshes or files.\nMatch influences and transfer vertices\nacross LODs or mesh variations."
     },
     {
         "label":  "Utils",
         "accent": Colors.ACCENT_UTILS,
-        "info":   "General utilities for skin weight operations.\nMirror weights across all layers,\nand other helpers not covered by NGSkin Tools."
+        "info":   "Clean rebind, manage influence locks,\nrun scene-wide health checks, and bake pose —\nhelpers that complement NGSkin Tools."
     },
     {
         "label":  "Skinning",
