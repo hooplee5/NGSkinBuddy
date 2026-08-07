@@ -4,6 +4,14 @@ This is my companion panel for [NGSkinTools2](https://www.ngSkinTools.com) that 
 
 I built it to give myself a consistent starting point I can share across rigs, and to cut down on the biggest pain points during skinning — like model and rig changes. I also wanted quick access to a few NGSkinTools2 utilities without going deeper into their menus.
 
+Here is a small video of how it looks in action
+
+
+
+https://github.com/user-attachments/assets/fdb45d93-018b-41a4-a5d1-471942ea65d2
+
+
+
 Read below for how to use the tool, and a detailed breakdown of what each tab does.
 
 ---
